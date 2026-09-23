@@ -1,9 +1,13 @@
+import asyncio
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import monitor
+from edge_adapter import EdgeSession
 
 
 class ReportTests(unittest.TestCase):
@@ -70,6 +74,45 @@ class ReportTests(unittest.TestCase):
         result = monitor.report(24)
         self.assertEqual(len(result["items"]), 1)
         self.assertIsNone(result["views_delta"])
+
+    def test_favorite_import_and_owner_confirmation(self):
+        url = "https://www.goofish.com/item?id=1234567890&spm=collection"
+        imported = monitor.save_favorites([monitor.FavoriteInput(url=url, title="收藏的宝贝")])
+        self.assertEqual(imported["imported"], 1)
+        self.assertEqual(imported["recognized"], 1)
+        self.assertEqual(len(monitor.report(24)["favorites"]), 1)
+        with self.assertRaises(Exception):
+            monitor.chrome_run_item(monitor.CapturedItem(
+                seller_id="seller123", seller_url="https://www.goofish.com/personal?userId=different123",
+                url=url, title="收藏的宝贝", price="99"))
+        saved = monitor.chrome_run_item(monitor.CapturedItem(
+            seller_id="seller123", seller_url="https://www.goofish.com/personal?userId=seller123",
+            seller_name="宝贝卖家", url=url, title="商品详情", price="99", views=20))
+        self.assertEqual(saved["id"], "1234567890")
+        result = monitor.report(24)
+        self.assertEqual(result["items"][0]["seller_id"], "seller123")
+        self.assertEqual(result["favorites"][0]["observed_title"], "商品详情")
+        self.assertFalse(result["sellers"][0]["selected"])
+
+    def test_deselected_favorite_is_not_reported_without_selected_seller(self):
+        url = "https://www.goofish.com/item?id=1234567890"
+        monitor.save_favorites([monitor.FavoriteInput(url=url, title="商品")])
+        monitor.chrome_run_item(monitor.CapturedItem(
+            seller_id="seller123", seller_url="https://www.goofish.com/personal?userId=seller123",
+            url=url, title="商品", price="99"))
+        monitor.patch_favorite("1234567890", monitor.FavoritePatch(selected=False))
+        self.assertEqual(monitor.report(24)["items"], [])
+
+    def test_edge_login_requires_page_without_visible_login(self):
+        session = EdgeSession(Path(self.temp.name) / "profile")
+        response = SimpleNamespace(ok=True, json=AsyncMock(return_value={"content": {"success": True}}))
+        context = SimpleNamespace(
+            cookies=AsyncMock(return_value=[{"name": "unb", "value": "test-user"}]),
+            request=SimpleNamespace(post=AsyncMock(return_value=response)))
+        page = SimpleNamespace(wait_for_timeout=AsyncMock(), evaluate=AsyncMock(return_value=True))
+        session.connect = AsyncMock(return_value=context)
+        session.current_page = AsyncMock(return_value=page)
+        self.assertFalse(asyncio.run(session.verify_login()))
 
 
 if __name__ == "__main__":

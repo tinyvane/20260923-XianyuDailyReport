@@ -1,12 +1,14 @@
 """Local report service. Chrome keeps the login; only visible metrics reach this database."""
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import sqlite3
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal
 from urllib.parse import parse_qs, urlparse
 
 from fastapi import FastAPI, HTTPException
@@ -15,13 +17,15 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from pydantic import BaseModel, Field
+from edge_adapter import EdgeSession
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 DB = DATA / "report.sqlite3"
 OFFICIAL = "https://www.goofish.com"
-TZ = timezone(timedelta(hours=8))
 last_login = "未检查"
+edge_session = EdgeSession(DATA / "browser-profile")
+edge_scan_lock = asyncio.Lock()
 
 
 class LocalOriginGuard(BaseHTTPMiddleware):
@@ -77,10 +81,15 @@ def init_db():
           valid INTEGER NOT NULL DEFAULT 0, message TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS favorite_items (
+          id TEXT PRIMARY KEY, url TEXT NOT NULL, title TEXT NOT NULL,
+          selected INTEGER NOT NULL DEFAULT 1, added_at TEXT NOT NULL
+        );
         """)
         db.execute("INSERT OR IGNORE INTO settings VALUES ('interval_hours','24')")
         db.execute("INSERT OR IGNORE INTO settings VALUES ('auto_collect','false')")
         db.execute("INSERT OR IGNORE INTO settings VALUES ('schedule_minutes','60')")
+        db.execute("INSERT OR IGNORE INTO settings VALUES ('browser_mode','\"edge_extension\"')")
 
 
 def settings():
@@ -129,10 +138,22 @@ def report(hours: float):
     target = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(timespec="seconds")
     with connect() as db:
         sellers = [dict(r) for r in db.execute("SELECT * FROM sellers ORDER BY selected DESC,name")]
+        favorites = [dict(r) for r in db.execute("""
+            SELECT favorite_items.*, items.title AS observed_title, items.seller_id,
+                   items.last_seen, items.price
+            FROM favorite_items LEFT JOIN items ON items.id=favorite_items.id
+            ORDER BY favorite_items.selected DESC, favorite_items.added_at DESC
+        """)]
         items = []
         price_changes = 0
         count_anomalies = 0
-        for item in db.execute("SELECT items.* FROM items JOIN sellers ON sellers.id=items.seller_id WHERE sellers.selected=1 ORDER BY last_seen DESC"):
+        for item in db.execute("""
+            SELECT items.* FROM items
+            LEFT JOIN sellers ON sellers.id=items.seller_id
+            LEFT JOIN favorite_items ON favorite_items.id=items.id
+            WHERE sellers.selected=1 OR favorite_items.selected=1
+            ORDER BY items.last_seen DESC
+        """):
             obj = dict(item)
             latest = db.execute("SELECT * FROM snapshots WHERE item_id=? ORDER BY collected_at DESC LIMIT 1", (item["id"],)).fetchone()
             baseline = db.execute("SELECT * FROM snapshots WHERE item_id=? AND collected_at<=? ORDER BY collected_at DESC LIMIT 1",
@@ -162,8 +183,8 @@ def report(hours: float):
     comparable_views = [x["views_delta"] for x in items if x["views_delta"] is not None]
     comparable_wants = [x["wants_delta"] for x in items if x["wants_delta"] is not None]
     return {
-        "date": datetime.now(TZ).strftime("%Y-%m-%d"), "hours": hours, "login": last_login,
-        "run": dict(run) if run else None, "sellers": seller_rows, "items": items,
+        "date": datetime.now().astimezone().strftime("%Y-%m-%d"), "hours": hours, "login": last_login,
+        "run": dict(run) if run else None, "sellers": seller_rows, "favorites": favorites, "items": items,
         "top": ranked, "valid": run["valid"] if run else 0,
         "found": run["found"] if run else 0,
         "views_delta": sum(comparable_views) if comparable_views else None,
@@ -171,7 +192,7 @@ def report(hours: float):
         "price_changes": price_changes if any(x["baseline_at"] for x in items) else None,
         "count_anomalies": count_anomalies,
         "uncomparable": sum(x["views_delta"] is None or x["wants_delta"] is None for x in items),
-        "settings": settings(), "running": False,
+        "settings": settings(), "running": edge_scan_lock.locked(),
     }
 
 
@@ -185,16 +206,27 @@ class SellerPatch(BaseModel):
     selected: bool | None = None
 
 
+class FavoriteInput(BaseModel):
+    url: str
+    title: str = Field(default="", max_length=180)
+
+
+class FavoritePatch(BaseModel):
+    selected: bool
+
+
 class SettingsInput(BaseModel):
     interval_hours: float = Field(ge=0.25, le=720)
     auto_collect: bool
     schedule_minutes: int = Field(ge=15, le=1440)
+    browser_mode: Literal["edge", "edge_extension", "chrome"] = "edge_extension"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     yield
+    await edge_session.close()
 
 
 app = FastAPI(title="闲鱼商品监控日报", lifespan=lifespan)
@@ -253,6 +285,32 @@ def delete_seller(seller_id: str):
     return {"ok": True}
 
 
+def save_favorites(candidates: list[FavoriteInput]):
+    imported = 0
+    valid = 0
+    with connect() as db:
+        for candidate in candidates[:200]:
+            item_id = item_identity(candidate.url)
+            if not item_id:
+                continue
+            valid += 1
+            exists = db.execute("SELECT 1 FROM favorite_items WHERE id=?", (item_id,)).fetchone()
+            db.execute("INSERT OR IGNORE INTO favorite_items VALUES (?,?,?,?,?)",
+                       (item_id, f"{OFFICIAL}/item?id={item_id}",
+                        candidate.title.strip() or f"收藏商品 {item_id}", 1, now()))
+            imported += not bool(exists)
+    return {"imported": imported, "recognized": valid, "limited": len(candidates) >= 200}
+
+
+@app.patch("/api/favorites/{item_id}")
+def patch_favorite(item_id: str, body: FavoritePatch):
+    with connect() as db:
+        result = db.execute("UPDATE favorite_items SET selected=? WHERE id=?", (int(body.selected), item_id))
+        if not result.rowcount:
+            raise HTTPException(404, "收藏商品不存在")
+    return {"ok": True}
+
+
 @app.put("/api/settings")
 def put_settings(body: SettingsInput):
     with connect() as db:
@@ -262,12 +320,125 @@ def put_settings(body: SettingsInput):
     return settings()
 
 
+@app.post("/api/edge/connect")
+async def edge_connect():
+    try:
+        page = await edge_session.current_page()
+        await page.bring_to_front()
+        return {"url": page.url}
+    except Exception as exc:
+        raise HTTPException(503, f"无法连接固定 Edge 登录资料：{str(exc).splitlines()[0][:130]}")
+
+
+@app.post("/api/edge/check")
+async def edge_check():
+    global last_login
+    passed = await edge_session.verify_login()
+    last_login = "Edge 已登录" if passed else "Edge 未登录或会话过期"
+    return {"ok": passed, "status": last_login}
+
+
+@app.post("/api/edge/following")
+async def edge_following():
+    try:
+        candidates = await edge_session.following()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    parsed = [SellerInput(**candidate) for candidate in candidates]
+    return chrome_following(parsed)
+
+
+@app.post("/api/edge/favorites")
+async def edge_favorites():
+    try:
+        candidates = await edge_session.favorites()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return save_favorites([FavoriteInput(**candidate) for candidate in candidates])
+
+
+@app.post("/api/edge/collect")
+async def edge_collect():
+    global last_login
+    if edge_scan_lock.locked():
+        raise HTTPException(409, "已有 Edge 采集任务运行中")
+    async with edge_scan_lock:
+        with connect() as db:
+            sellers = [dict(row) for row in db.execute("SELECT * FROM sellers WHERE selected=1 ORDER BY added_at")]
+            favorites = [dict(row) for row in db.execute("SELECT * FROM favorite_items WHERE selected=1 ORDER BY added_at")]
+        if not sellers and not favorites:
+            raise HTTPException(400, "请先导入收藏商品或勾选重点卖家")
+        if not await edge_session.verify_login():
+            last_login = "Edge 未登录或会话过期"
+            raise HTTPException(400, "Edge 闲鱼登录未通过验证，已停止采集")
+        last_login = "Edge 已登录"
+        run = chrome_run_start()
+        found = valid = 0
+        errors = []
+        scanned = set()
+        try:
+            for favorite in favorites:
+                found += 1
+                scanned.add(favorite["id"])
+                try:
+                    data = await edge_session.read_item(favorite["url"])
+                    owner_id, owner_url = seller_identity(data["seller_url"])
+                    chrome_run_item(CapturedItem(
+                        seller_id=owner_id, seller_url=owner_url,
+                        seller_name=data.get("seller_name", ""),
+                        url=favorite["url"], title=data["title"],
+                        image=data["image"], price=data["price"], views=data["views"],
+                        wants=data["wants"], status=data["status"]))
+                    valid += 1
+                except Exception as exc:
+                    errors.append(f"收藏商品 {favorite['id']}：{str(exc)[:90]}")
+                with connect() as db:
+                    db.execute("UPDATE runs SET found=?,valid=? WHERE id=?", (found, valid, run["run_id"]))
+                await asyncio.sleep(0.7)
+            for seller in sellers:
+                try:
+                    urls = await edge_session.list_items(seller["url"])
+                    urls = [url for url in urls if item_identity(url)][:40]
+                    if not urls:
+                        errors.append(f"{seller['name']}：主页没有可识别商品")
+                        continue
+                    for url in urls:
+                        if item_identity(url) in scanned:
+                            continue
+                        found += 1
+                        scanned.add(item_identity(url))
+                        try:
+                            data = await edge_session.read_item(url)
+                            owner_id, _ = seller_identity(data["seller_url"])
+                            if owner_id != seller["id"]:
+                                raise ValueError("商品页未能确认属于所选卖家")
+                            chrome_run_item(CapturedItem(
+                                seller_id=seller["id"], seller_url=data["seller_url"],
+                                seller_name=data.get("seller_name", ""),
+                                url=url, title=data["title"],
+                                image=data["image"], price=data["price"], views=data["views"],
+                                wants=data["wants"], status=data["status"]))
+                            valid += 1
+                        except Exception as exc:
+                            errors.append(f"{seller['name']} / {item_identity(url)}：{str(exc)[:90]}")
+                        with connect() as db:
+                            db.execute("UPDATE runs SET found=?,valid=? WHERE id=?", (found, valid, run["run_id"]))
+                        await asyncio.sleep(0.7)
+                except Exception as exc:
+                    errors.append(f"{seller['name']}：{str(exc)[:90]}")
+        except Exception as exc:
+            errors.append(str(exc)[:130])
+        return chrome_run_finish(RunFinish(run_id=run["run_id"], found=found, valid=valid, errors=errors))
+
+
 class ChromeStatus(BaseModel):
     ok: bool
 
 
 class CapturedItem(BaseModel):
     seller_id: str
+    seller_url: str | None = None
+    seller_name: str = Field(default="", max_length=80)
     url: str
     title: str = Field(min_length=1, max_length=180)
     image: str = ""
@@ -287,7 +458,7 @@ class RunFinish(BaseModel):
 @app.post("/api/chrome/status")
 def chrome_status(body: ChromeStatus):
     global last_login
-    last_login = "已连接 Chrome 登录页" if body.ok else "Chrome 登录未确认"
+    last_login = "已连接现有浏览器登录页" if body.ok else "现有浏览器登录未确认"
     return {"status": last_login}
 
 
@@ -307,11 +478,18 @@ def chrome_following(candidates: list[SellerInput]):
     return {"imported": imported}
 
 
+@app.post("/api/chrome/favorites")
+def chrome_favorites(candidates: list[FavoriteInput]):
+    return save_favorites(candidates)
+
+
 @app.post("/api/chrome/run/start")
 def chrome_run_start():
     with connect() as db:
-        if not db.execute("SELECT 1 FROM sellers WHERE selected=1").fetchone():
-            raise HTTPException(400, "请先在监控名单中勾选重点卖家")
+        selected_seller = db.execute("SELECT 1 FROM sellers WHERE selected=1").fetchone()
+        selected_favorite = db.execute("SELECT 1 FROM favorite_items WHERE selected=1").fetchone()
+        if not selected_seller and not selected_favorite:
+            raise HTTPException(400, "请先导入收藏商品或勾选重点卖家")
         run_id = db.execute("INSERT INTO runs(started_at,state) VALUES (?,?)", (now(), "运行中")).lastrowid
     return {"run_id": run_id}
 
@@ -328,8 +506,21 @@ def chrome_run_item(item: CapturedItem):
         if parsed.scheme not in ("https", "http"):
             raise HTTPException(400, "商品图片地址无效")
     with connect() as db:
-        if not db.execute("SELECT 1 FROM sellers WHERE id=? AND selected=1", (item.seller_id,)).fetchone():
-            raise HTTPException(400, "卖家未被选为重点")
+        selected_seller = db.execute("SELECT 1 FROM sellers WHERE id=? AND selected=1", (item.seller_id,)).fetchone()
+        selected_favorite = db.execute("SELECT 1 FROM favorite_items WHERE id=? AND selected=1", (item_id,)).fetchone()
+        if not selected_seller and not selected_favorite:
+            raise HTTPException(400, "商品和卖家均未被选为重点")
+        if item.seller_url:
+            try:
+                confirmed_id, seller_url = seller_identity(item.seller_url)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            if confirmed_id != item.seller_id:
+                raise HTTPException(400, "商品卖家身份不匹配")
+            db.execute("INSERT OR IGNORE INTO sellers VALUES (?,?,?,?,?)",
+                       (item.seller_id, item.seller_name.strip() or f"用户 {item.seller_id}", seller_url, 0, now()))
+        if not db.execute("SELECT 1 FROM sellers WHERE id=?", (item.seller_id,)).fetchone():
+            raise HTTPException(400, "无法确认商品卖家")
         stamp = now()
         db.execute("""INSERT INTO items VALUES (?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET seller_id=excluded.seller_id,
@@ -338,6 +529,7 @@ def chrome_run_item(item: CapturedItem):
             (item_id, item.seller_id, item.title, item.url, item.image, item.price, stamp))
         db.execute("INSERT OR REPLACE INTO snapshots VALUES (?,?,?,?,?,?)",
                    (item_id, stamp, item.views, item.wants, item.price, item.status))
+        db.execute("UPDATE favorite_items SET title=? WHERE id=?", (item.title, item_id))
     return {"id": item_id}
 
 

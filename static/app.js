@@ -19,6 +19,11 @@ async function action(path, options, success) {
 }
 function render(data) {
   current = data;
+  $("browser-mode").value = data.settings.browser_mode || "edge_extension";
+  const isExtension = $("browser-mode").value !== "edge";
+  $("open-browser").textContent = isExtension ? "连接现有浏览器" : "打开固定 Edge";
+  $("import-following").textContent = "导入收藏商品";
+  $("extension-guide").hidden = !isExtension;
   $("report-date").textContent = data.date;
   $("hours").value = String(data.hours);
   $("interval-label").textContent = data.hours;
@@ -32,7 +37,9 @@ function render(data) {
   $("count-unknown").textContent = data.count_anomalies;
   $("price-change").textContent = data.price_changes == null ? "—" : data.price_changes;
   $("missing-count").textContent = data.uncomparable;
-  if (!collecting) $("control-status").textContent = `闲鱼登录：${data.login} · 已选 ${data.sellers.filter(s=>s.selected).length} 位卖家`;
+  const favorites = data.favorites || [];
+  const selectedFavorites = favorites.filter(f => f.selected);
+  if (!collecting) $("control-status").textContent = `闲鱼登录：${data.login} · 已选 ${selectedFavorites.length} 件商品、${data.sellers.filter(s=>s.selected).length} 位卖家`;
   $("collect").disabled = collecting;
   $("ranking-note").textContent = data.top.length ? `按最近 ${data.hours} 小时浏览增长排序` : "";
   $("ranking").innerHTML = data.top.length ? data.top.map((item, i) => {
@@ -40,7 +47,9 @@ function render(data) {
     return `<div class="rank-row"><span class="rank">${i+1}</span><span class="rank-gray">${i+1}</span>${item.image ? `<img src="${esc(item.image)}" alt="" referrerpolicy="no-referrer">` : '<span class="avatar-placeholder">▣</span>'}<a class="name" href="${esc(item.url)}" target="_blank" rel="noopener noreferrer" title="${esc(item.title)}">${esc(item.title)}</a><span class="seller-name">${esc(seller?.name || "未知卖家")}</span><span class="deltas"><b class="view">${number(item.views_delta)}浏览</b>，<b class="want">${number(item.wants_delta)}想要</b></span></div>`;
   }).join("") : '<div class="empty-state">还没有可对比的数据。完成首次采集后，经过选定时长再采集即可看到增长榜。</div>';
   $("seller-note").textContent = data.sellers.length ? `${data.sellers.filter(s=>s.selected).length} 位重点卖家` : "";
-  $("seller-report").innerHTML = data.sellers.filter(s=>s.selected).length ? data.sellers.filter(s=>s.selected).map(s => `<div class="seller-bullet"><span><a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.name)}</a>：监控${s.count}件商品，合计${number(s.views_delta)}浏览、${number(s.wants_delta)}想要</span></div>`).join("") : '<div class="empty-state">尚未选择重点卖家。请在已登录的 Chrome 关注列表导入并勾选，或在下方手动添加主页链接。</div>';
+  $("seller-report").innerHTML = data.sellers.filter(s=>s.selected).length ? data.sellers.filter(s=>s.selected).map(s => `<div class="seller-bullet"><span><a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.name)}</a>：监控${s.count}件商品，合计${number(s.views_delta)}浏览、${number(s.wants_delta)}想要</span></div>`).join("") : '<div class="empty-state">尚未选择重点卖家。采集收藏商品后可识别卖家，也可在下方添加卖家主页。</div>';
+  $("favorite-note").textContent = favorites.length ? `已选 ${selectedFavorites.length} / 导入 ${favorites.length} 件` : "尚未导入";
+  $("favorite-list").innerHTML = favorites.length ? favorites.map(f => `<label class="favorite-chip"><input type="checkbox" data-favorite="${esc(f.id)}" ${f.selected ? "checked" : ""}><span class="favorite-title"><a href="${esc(f.url)}" target="_blank" rel="noopener noreferrer">${esc(f.observed_title || f.title)}</a><small>${f.last_seen ? `最近采集：${esc(new Date(f.last_seen).toLocaleString("zh-CN"))}` : "待采集详情"}</small></span><span class="favorite-price">${f.price ? `¥${esc(f.price)}` : "—"}</span></label>`).join("") : '<p class="list-empty">先在闲鱼打开“我的收藏”有效宝贝页，再点击“导入收藏商品”。</p>';
   $("seller-list").innerHTML = data.sellers.length ? data.sellers.map(s => `<div class="seller-chip"><input type="checkbox" data-select="${esc(s.id)}" aria-label="监控 ${esc(s.name)}" ${s.selected ? "checked" : ""}><input class="chip-name" data-name="${esc(s.id)}" aria-label="卖家备注" value="${esc(s.name)}"><a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">主页 ↗</a><button type="button" data-remove="${esc(s.id)}" aria-label="取消监控 ${esc(s.name)}">×</button></div>`).join("") : '<p class="list-empty">暂无卖家</p>';
   $("auto-collect").checked = data.settings.auto_collect;
   $("schedule-minutes").value = String(data.settings.schedule_minutes);
@@ -54,8 +63,8 @@ function extensionCall(command, payload = {}) {
     const id = crypto.randomUUID();
     const timer = setTimeout(() => {
       window.removeEventListener("message", receive);
-      reject(Error("未收到 Chrome 扩展响应。请在 chrome://extensions 加载本项目 chrome-extension 文件夹，并刷新日报页面"));
-    }, command === "status" ? 7000 : command === "following" ? 12000 : 55000);
+      reject(Error("未收到浏览器扩展响应。请在扩展管理页加载本项目 chrome-extension 文件夹，并刷新日报页面"));
+    }, command === "status" ? 7000 : ["following", "favorites"].includes(command) ? 15000 : 55000);
     function receive(event) {
       if (event.source !== window || event.origin !== location.origin || event.data?.source !== "xianyu-report-extension" || event.data.id !== id) return;
       clearTimeout(timer);
@@ -76,25 +85,44 @@ async function collectChrome() {
   if (collecting) return;
   collecting = true;
   $("collect").disabled = true;
-  $("control-status").textContent = "正在连接已登录的 Chrome";
+  $("control-status").textContent = "正在连接已登录的浏览器";
   let run = null, found = 0, valid = 0;
   const errors = [];
   try {
     await chromeStatus();
     const sellers = current.sellers.filter(s => s.selected);
-    if (!sellers.length) throw Error("请先在监控名单中勾选重点卖家");
+    const favorites = (current.favorites || []).filter(f => f.selected);
+    if (!sellers.length && !favorites.length) throw Error("请先导入收藏商品或勾选重点卖家");
     run = await api("/api/chrome/run/start", {method:"POST"});
+    const scanned = new Set();
+    for (const favorite of favorites) {
+      found++;
+      scanned.add(favorite.id);
+      try {
+        $("control-status").textContent = `正在采集收藏商品 ${valid}/${found} 件有效`;
+        const result = await extensionCall("readItem", {url:favorite.url});
+        await api("/api/chrome/run/item", {method:"POST",body:JSON.stringify({
+          ...result.item, seller_id:result.item.sellerId,
+          seller_url:result.item.sellerUrl, seller_name:result.item.sellerName,
+          url:favorite.url
+        })});
+        valid++;
+      } catch(error) { errors.push(`收藏商品 ${favorite.id}：${error.message}`); }
+    }
     for (const seller of sellers) {
       try {
         $("control-status").textContent = `正在读取 ${seller.name} 的商品`;
         const list = await extensionCall("listItems", {url:seller.url});
         if (!list.urls.length) { errors.push(`${seller.name}：未发现可识别商品`); continue; }
         for (const url of list.urls) {
+          const itemId = new URL(url).searchParams.get("id");
+          if (scanned.has(itemId)) continue;
+          scanned.add(itemId);
           found++;
           try {
             $("control-status").textContent = `正在采集 ${seller.name} · ${valid}/${found} 件有效`;
             const result = await extensionCall("readItem", {url,sellerId:seller.id});
-            await api("/api/chrome/run/item", {method:"POST",body:JSON.stringify({...result.item,seller_id:seller.id,url})});
+            await api("/api/chrome/run/item", {method:"POST",body:JSON.stringify({...result.item,seller_id:seller.id,seller_url:result.item.sellerUrl,seller_name:result.item.sellerName,url})});
             valid++;
           } catch(error) { errors.push(`${seller.name} / 商品：${error.message}`); }
         }
@@ -111,24 +139,55 @@ async function collectChrome() {
     await refresh();
   }
 }
+async function collectEdge() {
+  if (collecting) return;
+  collecting = true;
+  $("collect").disabled = true;
+  $("control-status").textContent = "正在复用已登录的 Edge 资料采集";
+  try {
+    const result = await api("/api/edge/collect", {method:"POST"});
+    notify(`${result.state}：${result.valid}/${result.found} 件有效。 ${result.message}`);
+  } catch(error) { notify(error.message); }
+  finally { collecting = false; $("collect").disabled = false; await refresh(); }
+}
+async function collectSelected() {
+  lastAutomaticAttempt = Date.now();
+  return $("browser-mode").value === "edge" ? collectEdge() : collectChrome();
+}
 $("open-browser").addEventListener("click", async () => {
-  try { await chromeStatus(); notify("已连接当前 Chrome 闲鱼标签页"); }
+  if ($("browser-mode").value === "edge") {
+    await action("/api/edge/connect", {method:"POST"}, "已打开原有 Edge 闲鱼窗口；登录资料会继续保留");
+    return;
+  }
+  try { await chromeStatus(); notify("已连接当前浏览器的闲鱼标签页"); }
   catch(error) { notify(error.message); }
 });
 $("check-login").addEventListener("click", async () => {
-  try { await chromeStatus(); notify("Chrome 闲鱼会话可用"); }
+  if ($("browser-mode").value === "edge") {
+    await action("/api/edge/check", {method:"POST"}, result => result.ok ? "Edge 闲鱼登录有效" : "Edge 登录未通过，请在原窗口重新登录");
+    return;
+  }
+  try { await chromeStatus(); notify("当前浏览器的闲鱼会话可用"); }
   catch(error) { await api("/api/chrome/status", {method:"POST",body:JSON.stringify({ok:false})}).catch(()=>{}); notify(error.message); await refresh(); }
 });
 $("import-following").addEventListener("click", async () => {
+  if ($("browser-mode").value === "edge") {
+    await action("/api/edge/favorites", {method:"POST"}, result => `识别 ${result.recognized} 件收藏商品，新增 ${result.imported} 件${result.limited ? "；已达到单次 200 件上限" : ""}`);
+    return;
+  }
   try {
     await chromeStatus();
-    const result = await extensionCall("following");
-    const saved = await api("/api/chrome/following", {method:"POST",body:JSON.stringify(result.candidates)});
-    notify(`新增 ${saved.imported} 位候选卖家，请在监控名单中勾选重点对象`);
+    const result = await extensionCall("favorites");
+    const saved = await api("/api/chrome/favorites", {method:"POST",body:JSON.stringify(result.candidates)});
+    notify(`识别 ${saved.recognized} 件收藏商品，新增 ${saved.imported} 件${saved.limited ? "；已达到单次 200 件上限" : ""}`);
     await refresh();
   } catch(error) { notify(error.message); }
 });
-$("collect").addEventListener("click", collectChrome);
+$("collect").addEventListener("click", collectSelected);
+$("browser-mode").addEventListener("change", async () => {
+  if (!current) return;
+  await action("/api/settings", {method:"PUT",body:JSON.stringify({...current.settings,browser_mode:$("browser-mode").value})}, "浏览器选择已保存");
+});
 $("hours").addEventListener("change", async () => { if (current) await action("/api/settings", {method:"PUT",body:JSON.stringify({...current.settings,interval_hours:Number($("hours").value)})}); else await refresh(); });
 $("refresh").addEventListener("click", refresh);
 $("copy-extension-path").addEventListener("click", async () => {
@@ -141,17 +200,20 @@ $("seller-list").addEventListener("change", async e => {
   if (e.target.dataset.name) await action(`/api/sellers/${encodeURIComponent(e.target.dataset.name)}`, {method:"PATCH",body:JSON.stringify({name:e.target.value})});
 });
 $("seller-list").addEventListener("click", async e => {if (e.target.dataset.remove) await action(`/api/sellers/${encodeURIComponent(e.target.dataset.remove)}`, {method:"DELETE"}, "已停止监控该卖家");});
+$("favorite-list").addEventListener("change", async e => {
+  if (e.target.dataset.favorite) await action(`/api/favorites/${encodeURIComponent(e.target.dataset.favorite)}`, {method:"PATCH",body:JSON.stringify({selected:e.target.checked})});
+});
 $("settings-button").addEventListener("click", ()=>$("settings-dialog").showModal());
-$("save-settings").addEventListener("click", async () => { const result = await action("/api/settings", {method:"PUT",body:JSON.stringify({interval_hours:Number($("hours").value),auto_collect:$("auto-collect").checked,schedule_minutes:Number($("schedule-minutes").value)})}, "设置已保存"); if (result) $("settings-dialog").close();});
+$("save-settings").addEventListener("click", async () => { const result = await action("/api/settings", {method:"PUT",body:JSON.stringify({interval_hours:Number($("hours").value),auto_collect:$("auto-collect").checked,schedule_minutes:Number($("schedule-minutes").value),browser_mode:$("browser-mode").value})}, "设置已保存"); if (result) $("settings-dialog").close();});
 refresh().then(async () => {
-  if (!autoAttempted && current?.settings.auto_collect && current.sellers.some(s=>s.selected)) {
-    autoAttempted = true; lastAutomaticAttempt = Date.now(); await collectChrome();
+  if (!autoAttempted && current?.settings.auto_collect && (current.sellers.some(s=>s.selected) || current.favorites?.some(f=>f.selected))) {
+    autoAttempted = true; await collectSelected();
   }
 });
 setInterval(async () => {
   await refresh();
-  if (!current?.settings.auto_collect || !current.sellers.some(s=>s.selected) || collecting) return;
+  if (!current?.settings.auto_collect || !(current.sellers.some(s=>s.selected) || current.favorites?.some(f=>f.selected)) || collecting) return;
   if (Date.now() - lastAutomaticAttempt < current.settings.schedule_minutes * 60000) return;
   lastAutomaticAttempt = Date.now();
-  await collectChrome();
+  await collectSelected();
 }, 60000);

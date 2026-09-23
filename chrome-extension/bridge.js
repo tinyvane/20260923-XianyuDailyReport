@@ -1,5 +1,5 @@
 (() => {
-  const allowed = new Set(["status", "following", "listItems", "readItem"]);
+  const allowed = new Set(["status", "following", "favorites", "listItems", "readItem"]);
   window.addEventListener("message", event => {
     if (event.source !== window || event.origin !== location.origin) return;
     const request = event.data;
