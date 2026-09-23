@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import monitor
 from edge_adapter import EdgeSession
@@ -69,6 +69,8 @@ class ReportTests(unittest.TestCase):
             seller_id="seller123", url="https://www.goofish.com/item?id=1234567890",
             title="测试商品", price="99", views=15, wants=2))
         self.assertEqual(saved["id"], "1234567890")
+        monitor.chrome_run_progress(monitor.RunProgress(run_id=run["run_id"], found=1, valid=1))
+        self.assertEqual(monitor.report(24)["run"]["valid"], 1)
         finish = monitor.chrome_run_finish(monitor.RunFinish(run_id=run["run_id"], found=1, valid=1))
         self.assertEqual(finish["state"], "完成")
         result = monitor.report(24)
@@ -81,6 +83,8 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(imported["imported"], 1)
         self.assertEqual(imported["recognized"], 1)
         self.assertEqual(len(monitor.report(24)["favorites"]), 1)
+        self.assertFalse(monitor.report(24)["favorites"][0]["selected"])
+        monitor.patch_favorite("1234567890", monitor.FavoritePatch(selected=True))
         with self.assertRaises(Exception):
             monitor.chrome_run_item(monitor.CapturedItem(
                 seller_id="seller123", seller_url="https://www.goofish.com/personal?userId=different123",
@@ -92,16 +96,73 @@ class ReportTests(unittest.TestCase):
         result = monitor.report(24)
         self.assertEqual(result["items"][0]["seller_id"], "seller123")
         self.assertEqual(result["favorites"][0]["observed_title"], "商品详情")
+        self.assertTrue(result["sellers"][0]["linked"])
         self.assertFalse(result["sellers"][0]["selected"])
 
     def test_deselected_favorite_is_not_reported_without_selected_seller(self):
         url = "https://www.goofish.com/item?id=1234567890"
         monitor.save_favorites([monitor.FavoriteInput(url=url, title="商品")])
+        monitor.patch_favorite("1234567890", monitor.FavoritePatch(selected=True))
         monitor.chrome_run_item(monitor.CapturedItem(
             seller_id="seller123", seller_url="https://www.goofish.com/personal?userId=seller123",
             url=url, title="商品", price="99"))
         monitor.patch_favorite("1234567890", monitor.FavoritePatch(selected=False))
         self.assertEqual(monitor.report(24)["items"], [])
+        self.assertFalse(monitor.report(24)["sellers"][0]["linked"])
+
+    def test_only_selected_favorites_count_for_automatically_linked_seller(self):
+        urls = [f"https://www.goofish.com/item?id={item_id}" for item_id in ("1234567890", "1234567891")]
+        monitor.save_favorites([monitor.FavoriteInput(url=url, title="候选") for url in urls])
+        for url in urls:
+            monitor.patch_favorite(url.split("=")[-1], monitor.FavoritePatch(selected=True))
+            monitor.chrome_run_item(monitor.CapturedItem(
+                seller_id="seller123", seller_url="https://www.goofish.com/personal?userId=seller123",
+                seller_name="同一卖家", url=url, title="商品", price="99"))
+        monitor.patch_favorite("1234567891", monitor.FavoritePatch(selected=False))
+        result = monitor.report(24)
+        self.assertEqual([item["id"] for item in result["items"]], ["1234567890"])
+        self.assertEqual(result["sellers"][0]["count"], 1)
+        self.assertTrue(result["sellers"][0]["linked"])
+        self.assertFalse(result["sellers"][0]["selected"])
+
+    def test_selecting_favorite_can_resolve_owner_without_user_entering_url(self):
+        item_id = "1234567890"
+        url = f"https://www.goofish.com/item?id={item_id}"
+        monitor.save_favorites([monitor.FavoriteInput(url=url, title="候选")])
+        monitor.patch_favorite(item_id, monitor.FavoritePatch(selected=True))
+        detail = {
+            "seller_url": "https://www.goofish.com/personal?userId=seller123",
+            "seller_name": "自动找到的卖家", "title": "商品详情", "image": "",
+            "price": "99", "views": 20, "wants": 3, "status": "未知",
+        }
+        with patch.object(monitor.edge_session, "verify_login", AsyncMock(return_value=True)), \
+             patch.object(monitor.edge_session, "read_item", AsyncMock(return_value=detail)):
+            saved = asyncio.run(monitor.edge_resolve_favorite(item_id))
+        self.assertEqual(saved["seller_name"], "自动找到的卖家")
+        result = monitor.report(24)
+        self.assertEqual(result["sellers"][0]["name"], "自动找到的卖家")
+        self.assertTrue(result["sellers"][0]["linked"])
+        self.assertFalse(result["sellers"][0]["selected"])
+        self.assertEqual(result["items"][0]["seller_id"], "seller123")
+
+    def test_favorite_failure_and_old_database_migration(self):
+        with monitor.connect() as db:
+            db.execute("DROP TABLE favorite_items")
+            db.execute("""CREATE TABLE favorite_items (
+                id TEXT PRIMARY KEY, url TEXT NOT NULL, title TEXT NOT NULL,
+                selected INTEGER NOT NULL DEFAULT 1, added_at TEXT NOT NULL)""")
+        monitor.init_db()
+        monitor.save_favorites([monitor.FavoriteInput(
+            url="https://www.goofish.com/item?id=1234567890", title="旧收藏", price="29.90")])
+        monitor.favorite_failure("1234567890", monitor.FavoriteFailure(
+            state="失效", reason="商品已被删除"))
+        favorite = monitor.report(24)["favorites"][0]
+        self.assertEqual(favorite["state"], "失效")
+        self.assertEqual(favorite["last_error"], "商品已被删除")
+        self.assertEqual(favorite["card_price"], "29.90")
+        self.assertEqual(monitor.select_favorites(monitor.FavoriteSelection(
+            ids=["1234567890"], selected=False))["updated"], 1)
+        self.assertEqual(monitor.report(24)["favorites"][0]["selected"], 0)
 
     def test_edge_login_requires_page_without_visible_login(self):
         session = EdgeSession(Path(self.temp.name) / "profile")

@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import re
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 OFFICIAL = "https://www.goofish.com"
 CHALLENGE = re.compile(r"非法访问|安全验证|验证码|滑块|请登录|扫码登录")
@@ -102,18 +102,31 @@ class EdgeSession:
         await page.wait_for_timeout(900)
         old_scroll = await page.evaluate("window.scrollY")
         try:
-            for _ in range(6):
+            seen = {}
+            stable = 0
+            for index in range(24):
+                before = len(seen)
+                candidates = await page.locator('a[href*="/item?"]').evaluate_all(
+                    """nodes => nodes.map(a => {
+                      const raw = a.innerText || '';
+                      const lines = raw.split(/\\n+/).map(x => x.trim()).filter(Boolean);
+                      const title = lines.find(x => x !== '取消收藏' && x !== '我想要' && !/^¥/.test(x)) || a.querySelector('img')?.alt || '';
+                      const price = raw.match(/¥\\s*([\\d,.]+(?:[ \\t]*[-–~][ \\t]*[\\d,.]+)?)/)?.[1] || null;
+                      return {url:a.href,title:title.slice(0,180),price};
+                    })""")
+                for candidate in candidates:
+                    item_id = parse_qs(urlparse(candidate["url"]).query).get("id", [""])[0]
+                    if re.fullmatch(r"\d{8,22}", item_id):
+                        seen[item_id] = candidate
+                stable = stable + 1 if len(seen) == before else 0
+                if len(seen) >= 200 or (index >= 4 and stable >= 4):
+                    break
                 await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(550)
+                await page.wait_for_timeout(700)
             text = (await page.locator("body").inner_text())[:1500]
             if CHALLENGE.search(text):
                 raise ValueError("收藏页要求登录或安全验证")
-            found = await page.locator('a[href*="/item?"]').evaluate_all(
-                """nodes => [...new Map(nodes.map(a => [a.href, {
-                  url:a.href,
-                  title:(a.innerText || a.querySelector('img')?.alt || '').trim().slice(0,180)
-                }])).values()].slice(0,200)"""
-            )
+            found = list(seen.values())[:200]
             if not found:
                 raise ValueError("收藏页没有找到可识别的商品链接，请确认处于「有效宝贝」且商品卡片已加载")
             return found
@@ -158,18 +171,21 @@ class EdgeSession:
                 document.querySelector('a[href*="/personal"],a[href*="/user"]');
               return {
                 blocked: /非法访问|安全验证|验证码|滑块|请登录|扫码登录/.test(body.slice(0,1200)),
+                deleted: /糟糕！宝贝被删掉了|宝贝被删掉了|商品已被删除/.test(body.slice(0,1200)),
                 title: (document.querySelector('h1')?.innerText || document.querySelector('meta[property="og:title"]')?.content || '').trim().slice(0,180),
                 seller_url: seller?.href || '',
                 seller_name: (seller?.innerText || '').trim().slice(0,80),
                 image: document.querySelector('meta[property="og:image"]')?.content || '',
-                price: text.match(/¥\s*([\d,.]+)/)?.[1] || null,
-                views: read(/浏览\s*(\d+(?:\.\d+)?[万千]?)/, /(\d+(?:\.\d+)?[万千]?)\s*(?:次)?浏览/),
-                wants: read(/想要\s*(\d+(?:\.\d+)?[万千]?)/, /(\d+(?:\.\d+)?[万千]?)\s*人想要/),
+                price: text.match(/¥\s*([\d,.]+(?:[ \t]*[-–~][ \t]*[\d,.]+)?)/)?.[1] || null,
+                views: read(/(\d+(?:\.\d+)?[万千]?)\s*(?:次)?浏览/, /浏览[ \t]+(\d+(?:\.\d+)?[万千]?)/),
+                wants: read(/(\d+(?:\.\d+)?[万千]?)\s*人想要/, /想要[ \t]+(\d+(?:\.\d+)?[万千]?)/),
                 status: /宝贝已下架|商品已下架|已售出/.test(text) ? '已下架' : '未知'
               };
             }""")
             if data["blocked"]:
                 raise ValueError("商品页面要求登录或安全验证")
+            if data["deleted"]:
+                raise ValueError("商品已被删除")
             if not data["title"] or all(data[key] is None for key in ("price", "views", "wants")):
                 raise ValueError("商品页面缺少可识别的标题或指标")
             return data
