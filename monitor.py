@@ -172,7 +172,8 @@ def report(hours: float):
             SELECT items.* FROM items
             LEFT JOIN sellers ON sellers.id=items.seller_id
             LEFT JOIN favorite_items ON favorite_items.id=items.id
-            WHERE favorite_items.selected=1 OR (sellers.selected=1 AND favorite_items.id IS NULL)
+            WHERE (favorite_items.selected=1 AND favorite_items.state='有效')
+               OR (sellers.selected=1 AND favorite_items.id IS NULL)
             ORDER BY items.last_seen DESC
         """):
             obj = dict(item)

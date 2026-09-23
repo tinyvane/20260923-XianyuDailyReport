@@ -125,6 +125,22 @@ class ReportTests(unittest.TestCase):
         self.assertTrue(result["sellers"][0]["linked"])
         self.assertFalse(result["sellers"][0]["selected"])
 
+    def test_failed_refresh_does_not_present_old_snapshot_as_current(self):
+        item_id = "1234567890"
+        url = f"https://www.goofish.com/item?id={item_id}"
+        monitor.save_favorites([monitor.FavoriteInput(url=url, title="商品")])
+        monitor.patch_favorite(item_id, monitor.FavoritePatch(selected=True))
+        monitor.chrome_run_item(monitor.CapturedItem(
+            seller_id="seller123", seller_url="https://www.goofish.com/personal?userId=seller123",
+            seller_name="卖家", url=url, title="商品", price="99", views=20))
+        self.assertEqual(len(monitor.report(24)["items"]), 1)
+        monitor.favorite_failure(item_id, monitor.FavoriteFailure(
+            state="读取失败", reason="详情暂时没有指标"))
+        result = monitor.report(24)
+        self.assertEqual(result["items"], [])
+        self.assertTrue(result["sellers"][0]["linked"])
+        self.assertEqual(result["sellers"][0]["count"], 0)
+
     def test_selecting_favorite_can_resolve_owner_without_user_entering_url(self):
         item_id = "1234567890"
         url = f"https://www.goofish.com/item?id={item_id}"

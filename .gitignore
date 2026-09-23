@@ -3,6 +3,12 @@ __pycache__/
 .pytest_cache/
 data/
 .env
-.env.local
+.env.*
 dist/
-参考页面/闲鱼日报.png
+参考页面/
+*.sqlite3
+*.db
+*.log
+*.pem
+*.key
+*.p12

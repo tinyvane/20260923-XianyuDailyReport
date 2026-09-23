@@ -269,10 +269,6 @@ $("browser-mode").addEventListener("change", async () => {
 });
 $("hours").addEventListener("change", async () => { if (current) await action("/api/settings", {method:"PUT",body:JSON.stringify({...current.settings,interval_hours:Number($("hours").value)})}); else await refresh(); });
 $("refresh").addEventListener("click", refresh);
-$("copy-extension-path").addEventListener("click", async () => {
-  try { await navigator.clipboard.writeText("V:\\SyncRepos\\20260923-XianyuDailyReport\\chrome-extension"); notify("扩展目录已复制"); }
-  catch { notify("请在项目文件夹中选择 chrome-extension 目录"); }
-});
 $("seller-form").addEventListener("submit", async e => {e.preventDefault(); const result = await action("/api/sellers", {method:"POST",body:JSON.stringify({url:$("seller-url").value,name:$("seller-name").value})}, "卖家已添加"); if (result) e.target.reset();});
 $("seller-list").addEventListener("change", async e => {
   if (e.target.dataset.select) await action(`/api/sellers/${encodeURIComponent(e.target.dataset.select)}`, {method:"PATCH",body:JSON.stringify({selected:e.target.checked})});
