@@ -128,8 +128,9 @@ function itemData() {
   const title = (document.querySelector("h1")?.innerText || document.querySelector('meta[property="og:title"]')?.content || document.title.replace(/_闲鱼$/, "")).trim().slice(0,180);
   const sellerUrl = (document.querySelector('main a[href*="/personal"], main a[href*="/user"]') ||
     document.querySelector('a[href*="/personal"],a[href*="/user"]'))?.href || "";
-  const sellerName = (document.querySelector('main a[href*="/personal"], main a[href*="/user"]') ||
-    document.querySelector('a[href*="/personal"],a[href*="/user"]'))?.innerText?.trim().slice(0,80) || "";
+  const sellerName = ((document.querySelector('main a[href*="/personal"], main a[href*="/user"]') ||
+    document.querySelector('a[href*="/personal"],a[href*="/user"]'))?.innerText || "")
+    .split(/\r?\n/).map(line => line.trim()).find(Boolean)?.slice(0,80) || "";
   return {
     blocked: /非法访问|安全验证|验证码|滑块|请登录|扫码登录/.test(body.slice(0,1200)),
     deleted: /糟糕！宝贝被删掉了|宝贝被删掉了|商品已被删除/.test(body.slice(0,1200)),
@@ -141,7 +142,8 @@ function itemData() {
 async function handle(message, sender) {
   const {command,payload={}} = message;
   if (command === "status") {
-    const tab = await currentGoofishTab(sender.tab?.windowId);
+    const tabs = await chrome.tabs.query({url:["https://www.goofish.com/collection*", "https://goofish.com/collection*"]});
+    const tab = tabs.find(t => t.windowId === sender.tab?.windowId) || tabs[0] || await currentGoofishTab(sender.tab?.windowId);
     let result;
     try {
       await chrome.tabs.update(tab.id, {active:true});

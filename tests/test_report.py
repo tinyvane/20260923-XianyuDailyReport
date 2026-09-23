@@ -132,7 +132,7 @@ class ReportTests(unittest.TestCase):
         monitor.patch_favorite(item_id, monitor.FavoritePatch(selected=True))
         detail = {
             "seller_url": "https://www.goofish.com/personal?userId=seller123",
-            "seller_name": "自动找到的卖家", "title": "商品详情", "image": "",
+            "seller_name": "自动找到的卖家\n北京\n卖出211件宝贝", "title": "商品详情", "image": "",
             "price": "99", "views": 20, "wants": 3, "status": "未知",
         }
         with patch.object(monitor.edge_session, "verify_login", AsyncMock(return_value=True)), \

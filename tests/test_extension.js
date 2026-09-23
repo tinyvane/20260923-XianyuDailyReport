@@ -5,7 +5,7 @@ const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "..", "chrome-extension", "background.js"), "utf8");
 let body = "¥ 169\n343\n人想要\n2万\n浏览\n3d打印拉丝机，矿泉水瓶拉丝，可乐瓶拉丝，";
-const seller = {href:"https://www.goofish.com/personal?userId=seller123", innerText:"测试卖家"};
+const seller = {href:"https://www.goofish.com/personal?userId=seller123", innerText:"测试卖家\n北京\n卖出211件宝贝"};
 const document = {
   title:"3d打印拉丝机_闲鱼",
   body:{innerText:body},
@@ -22,6 +22,7 @@ const result = vm.runInContext("itemData()", context);
 assert.equal(result.views, 20000);
 assert.equal(result.wants, 343);
 assert.equal(result.price, "169");
+assert.equal(result.sellerName, "测试卖家");
 body = "¥ 2180 - 2980\n191\n人想要\n2万\n浏览\nHiveton H5AM";
 document.body.innerText = body;
 assert.equal(vm.runInContext("itemData()", context).price, "2180 - 2980");

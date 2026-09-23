@@ -174,7 +174,7 @@ class EdgeSession:
                 deleted: /糟糕！宝贝被删掉了|宝贝被删掉了|商品已被删除/.test(body.slice(0,1200)),
                 title: (document.querySelector('h1')?.innerText || document.querySelector('meta[property="og:title"]')?.content || '').trim().slice(0,180),
                 seller_url: seller?.href || '',
-                seller_name: (seller?.innerText || '').trim().slice(0,80),
+                seller_name: (seller?.innerText || '').split(/\r?\n/).map(line => line.trim()).find(Boolean)?.slice(0,80) || '',
                 image: document.querySelector('meta[property="og:image"]')?.content || '',
                 price: text.match(/¥\s*([\d,.]+(?:[ \t]*[-–~][ \t]*[\d,.]+)?)/)?.[1] || null,
                 views: read(/(\d+(?:\.\d+)?[万千]?)\s*(?:次)?浏览/, /浏览[ \t]+(\d+(?:\.\d+)?[万千]?)/),

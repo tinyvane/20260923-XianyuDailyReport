@@ -193,6 +193,7 @@ function queueOwnerResolution(ids) {
   const unresolved = ids.filter(id => current?.favorites.some(f => f.id === id && f.selected && !f.seller_id));
   if (!unresolved.length) return;
   ownerQueue = ownerQueue.then(async () => {
+    if ($("browser-mode").value !== "edge") await chromeStatus();
     let consecutiveFailures = 0;
     for (const id of unresolved) {
       const favorite = current?.favorites.find(f => f.id === id);

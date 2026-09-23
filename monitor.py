@@ -41,6 +41,10 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def seller_display_name(value: str, seller_id: str) -> str:
+    return next((line.strip()[:80] for line in value.splitlines() if line.strip()), f"用户 {seller_id}")
+
+
 @contextmanager
 def connect():
     DATA.mkdir(exist_ok=True)
@@ -101,6 +105,9 @@ def init_db():
         db.execute("INSERT OR IGNORE INTO settings VALUES ('auto_collect','false')")
         db.execute("INSERT OR IGNORE INTO settings VALUES ('schedule_minutes','60')")
         db.execute("INSERT OR IGNORE INTO settings VALUES ('browser_mode','\"edge_extension\"')")
+        for row in db.execute("SELECT id,name FROM sellers WHERE instr(name,char(10))>0 OR instr(name,char(13))>0"):
+            db.execute("UPDATE sellers SET name=? WHERE id=?",
+                       (seller_display_name(row["name"], row["id"]), row["id"]))
 
 
 def settings():
@@ -287,7 +294,7 @@ def add_seller(body: SellerInput):
         raise HTTPException(400, str(exc))
     with connect() as db:
         db.execute("INSERT OR IGNORE INTO sellers VALUES (?,?,?,?,?)",
-                   (user_id, body.name.strip() or f"用户 {user_id}", url, 1, now()))
+                   (user_id, seller_display_name(body.name, user_id), url, 1, now()))
     return {"id": user_id}
 
 
@@ -560,7 +567,7 @@ def chrome_following(candidates: list[SellerInput]):
                 continue
             exists = db.execute("SELECT 1 FROM sellers WHERE id=?", (user_id,)).fetchone()
             db.execute("INSERT OR IGNORE INTO sellers VALUES (?,?,?,?,?)",
-                       (user_id, candidate.name.strip() or f"用户 {user_id}", url, 0, now()))
+                       (user_id, seller_display_name(candidate.name, user_id), url, 0, now()))
             imported += not bool(exists)
     return {"imported": imported}
 
@@ -606,11 +613,12 @@ def chrome_run_item(item: CapturedItem):
                 raise HTTPException(400, str(exc))
             if confirmed_id != item.seller_id:
                 raise HTTPException(400, "商品卖家身份不匹配")
+            name = seller_display_name(item.seller_name, item.seller_id)
             db.execute("INSERT OR IGNORE INTO sellers VALUES (?,?,?,?,?)",
-                       (item.seller_id, item.seller_name.strip() or f"用户 {item.seller_id}", seller_url, 0, now()))
+                       (item.seller_id, name, seller_url, 0, now()))
             if item.seller_name.strip():
                 db.execute("UPDATE sellers SET name=? WHERE id=? AND name=?",
-                           (item.seller_name.strip(), item.seller_id, f"用户 {item.seller_id}"))
+                           (name, item.seller_id, f"用户 {item.seller_id}"))
         if not db.execute("SELECT 1 FROM sellers WHERE id=?", (item.seller_id,)).fetchone():
             raise HTTPException(400, "无法确认商品卖家")
         stamp = now()
@@ -623,7 +631,8 @@ def chrome_run_item(item: CapturedItem):
                    (item_id, stamp, item.views, item.wants, item.price, item.status))
         db.execute("""UPDATE favorite_items SET title=?,state='有效',last_checked=?,last_error=NULL WHERE id=?""",
                    (item.title, stamp, item_id))
-    return {"id": item_id, "seller_id": item.seller_id, "seller_name": item.seller_name.strip() or f"用户 {item.seller_id}"}
+    return {"id": item_id, "seller_id": item.seller_id,
+            "seller_name": seller_display_name(item.seller_name, item.seller_id)}
 
 
 @app.post("/api/chrome/run/finish")
