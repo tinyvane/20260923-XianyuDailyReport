@@ -10,7 +10,7 @@
 
 当前面向 Windows 10/11。需要已安装的 Microsoft Edge 或 Google Chrome，以及 Python 3.11 或更新版本。首次运行需要联网安装 Python 依赖。已在 Windows 和 Python 3.13 上验证。
 
-1. 到 [Releases 页面](https://github.com/tinyvane/20260923-XianyuDailyReport/releases/latest)下载 `XianyuDailyReport-v0.1.0-windows.zip`。也可以在仓库首页点 **Code → Download ZIP** 下载源码。解压完整文件夹；不要只取出 `start.bat`，扩展和网页文件也要保留在同一项目目录。[GitHub 下载说明](https://docs.github.com/en/repositories/working-with-files/using-files/downloading-files-from-github)
+1. [直接下载 v0.1.0 Windows ZIP](https://github.com/tinyvane/20260923-XianyuDailyReport/releases/download/v0.1.0/XianyuDailyReport-v0.1.0-windows.zip)，或到 [Releases 页面](https://github.com/tinyvane/20260923-XianyuDailyReport/releases/latest)选择版本。也可以在仓库首页点 **Code → Download ZIP** 下载源码。解压完整文件夹；不要只取出 `start.bat`，扩展和网页文件也要保留在同一项目目录。[GitHub 下载说明](https://docs.github.com/en/repositories/working-with-files/using-files/downloading-files-from-github)
 2. 在命令提示符运行 `python --version` 或 `py -3 --version`，确认 Python 可用。若未安装，请先安装 Python，并在安装时启用 **Add python.exe to PATH**。
 3. 双击项目根目录的 `start.bat`。它会在项目内创建 `.venv`、安装依赖并打开 `http://127.0.0.1:5055/`。请保留弹出的命令窗口；关闭窗口后本机服务停止。若浏览器没有自动打开，在**已登录闲鱼的同一个浏览器**里手动打开该地址。
 
