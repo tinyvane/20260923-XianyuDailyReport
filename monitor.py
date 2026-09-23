@@ -1,0 +1,353 @@
+"""Local report service. Chrome keeps the login; only visible metrics reach this database."""
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+ROOT = Path(__file__).resolve().parent
+DATA = ROOT / "data"
+DB = DATA / "report.sqlite3"
+OFFICIAL = "https://www.goofish.com"
+TZ = timezone(timedelta(hours=8))
+last_login = "未检查"
+
+
+class LocalOriginGuard(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            origin = request.headers.get("origin")
+            if origin and origin not in ("http://127.0.0.1:5055", "http://localhost:5055"):
+                return JSONResponse({"detail": "只接受本机页面的操作"}, status_code=403)
+        return await call_next(request)
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+@contextmanager
+def connect():
+    DATA.mkdir(exist_ok=True)
+    conn = sqlite3.connect(DB)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def init_db():
+    with connect() as db:
+        db.executescript("""
+        CREATE TABLE IF NOT EXISTS sellers (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL,
+          selected INTEGER NOT NULL DEFAULT 1, added_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS items (
+          id TEXT PRIMARY KEY, seller_id TEXT NOT NULL REFERENCES sellers(id),
+          title TEXT NOT NULL, url TEXT NOT NULL, image TEXT, price TEXT,
+          last_seen TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS snapshots (
+          item_id TEXT NOT NULL REFERENCES items(id), collected_at TEXT NOT NULL,
+          views INTEGER, wants INTEGER, price TEXT, status TEXT,
+          PRIMARY KEY(item_id, collected_at)
+        );
+        CREATE INDEX IF NOT EXISTS snapshots_time ON snapshots(collected_at);
+        CREATE TABLE IF NOT EXISTS runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL,
+          finished_at TEXT, state TEXT NOT NULL, found INTEGER NOT NULL DEFAULT 0,
+          valid INTEGER NOT NULL DEFAULT 0, message TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        """)
+        db.execute("INSERT OR IGNORE INTO settings VALUES ('interval_hours','24')")
+        db.execute("INSERT OR IGNORE INTO settings VALUES ('auto_collect','false')")
+        db.execute("INSERT OR IGNORE INTO settings VALUES ('schedule_minutes','60')")
+
+
+def settings():
+    with connect() as db:
+        return {r["key"]: json.loads(r["value"]) for r in db.execute("SELECT * FROM settings")}
+
+
+def seller_identity(url: str):
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname not in ("www.goofish.com", "goofish.com"):
+        raise ValueError("只接受闲鱼官方 HTTPS 个人主页链接")
+    if not parsed.path.startswith(("/personal", "/user")):
+        raise ValueError("请提供闲鱼个人主页链接")
+    query = parse_qs(parsed.query)
+    user_id = next((query[key][0] for key in ("userId", "user_id", "id") if query.get(key)), "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}", user_id):
+        raise ValueError("个人主页缺少可识别的稳定用户 ID")
+    return user_id, f"{OFFICIAL}{parsed.path}?userId={user_id}"
+
+
+def item_identity(url: str):
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname not in ("www.goofish.com", "goofish.com") or parsed.path != "/item":
+        return None
+    item_id = parse_qs(parsed.query).get("id", [""])[0]
+    return item_id if re.fullmatch(r"\d{8,22}", item_id) else None
+
+
+def metric(text: str, kind: str):
+    patterns = {
+        "views": [r"(\d+(?:\.\d+)?[万千]?)\s*(?:次)?浏览", r"浏览\s*(\d+(?:\.\d+)?[万千]?)"],
+        "wants": [r"(\d+(?:\.\d+)?[万千]?)\s*人想要", r"想要\s*(\d+(?:\.\d+)?[万千]?)"],
+    }
+    for pattern in patterns[kind]:
+        found = re.search(pattern, text)
+        if found:
+            raw = found.group(1)
+            scale = 10000 if raw.endswith("万") else 1000 if raw.endswith("千") else 1
+            return round(float(raw.rstrip("万千")) * scale)
+    return None
+
+
+def report(hours: float):
+    if not 0.25 <= hours <= 720:
+        raise ValueError("对比时长必须在 0.25 到 720 小时之间")
+    target = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(timespec="seconds")
+    with connect() as db:
+        sellers = [dict(r) for r in db.execute("SELECT * FROM sellers ORDER BY selected DESC,name")]
+        items = []
+        price_changes = 0
+        count_anomalies = 0
+        for item in db.execute("SELECT items.* FROM items JOIN sellers ON sellers.id=items.seller_id WHERE sellers.selected=1 ORDER BY last_seen DESC"):
+            obj = dict(item)
+            latest = db.execute("SELECT * FROM snapshots WHERE item_id=? ORDER BY collected_at DESC LIMIT 1", (item["id"],)).fetchone()
+            baseline = db.execute("SELECT * FROM snapshots WHERE item_id=? AND collected_at<=? ORDER BY collected_at DESC LIMIT 1",
+                                  (item["id"], target)).fetchone()
+            if not latest:
+                continue
+            obj.update({key: latest[key] for key in ("views", "wants", "status", "collected_at")})
+            comparable = bool(baseline and latest["collected_at"] > target and latest["collected_at"] > baseline["collected_at"])
+            obj["views_delta"] = latest["views"] - baseline["views"] if comparable and latest["views"] is not None and baseline["views"] is not None else None
+            obj["wants_delta"] = latest["wants"] - baseline["wants"] if comparable and latest["wants"] is not None and baseline["wants"] is not None else None
+            if any(obj[k] is not None and obj[k] < 0 for k in ("views_delta", "wants_delta")):
+                count_anomalies += 1
+                obj["views_delta"] = obj["wants_delta"] = None
+            obj["baseline_at"] = baseline["collected_at"] if comparable else None
+            if comparable and (latest["price"] != baseline["price"] or latest["status"] != baseline["status"]):
+                price_changes += 1
+            items.append(obj)
+        run = db.execute("SELECT * FROM runs ORDER BY id DESC LIMIT 1").fetchone()
+    ranked = sorted([x for x in items if x["views_delta"] is not None], key=lambda x: x["views_delta"], reverse=True)[:5]
+    seller_rows = []
+    for seller in sellers:
+        own = [x for x in items if x["seller_id"] == seller["id"]]
+        view_changes = [x["views_delta"] for x in own if x["views_delta"] is not None]
+        want_changes = [x["wants_delta"] for x in own if x["wants_delta"] is not None]
+        seller_rows.append({**seller, "count": len(own), "views_delta": sum(view_changes) if view_changes else None,
+                            "wants_delta": sum(want_changes) if want_changes else None})
+    comparable_views = [x["views_delta"] for x in items if x["views_delta"] is not None]
+    comparable_wants = [x["wants_delta"] for x in items if x["wants_delta"] is not None]
+    return {
+        "date": datetime.now(TZ).strftime("%Y-%m-%d"), "hours": hours, "login": last_login,
+        "run": dict(run) if run else None, "sellers": seller_rows, "items": items,
+        "top": ranked, "valid": run["valid"] if run else 0,
+        "found": run["found"] if run else 0,
+        "views_delta": sum(comparable_views) if comparable_views else None,
+        "wants_delta": sum(comparable_wants) if comparable_wants else None,
+        "price_changes": price_changes if any(x["baseline_at"] for x in items) else None,
+        "count_anomalies": count_anomalies,
+        "uncomparable": sum(x["views_delta"] is None or x["wants_delta"] is None for x in items),
+        "settings": settings(), "running": False,
+    }
+
+
+class SellerInput(BaseModel):
+    url: str
+    name: str = Field(default="", max_length=80)
+
+
+class SellerPatch(BaseModel):
+    name: str | None = Field(default=None, max_length=80)
+    selected: bool | None = None
+
+
+class SettingsInput(BaseModel):
+    interval_hours: float = Field(ge=0.25, le=720)
+    auto_collect: bool
+    schedule_minutes: int = Field(ge=15, le=1440)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(title="闲鱼商品监控日报", lifespan=lifespan)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
+app.add_middleware(LocalOriginGuard)
+
+
+@app.get("/")
+def index():
+    return FileResponse(ROOT / "static" / "index.html")
+
+
+@app.get("/static/{name}")
+def static_file(name: str):
+    if name not in ("app.css", "app.js"):
+        raise HTTPException(404)
+    return FileResponse(ROOT / "static" / name)
+
+
+@app.get("/api/report")
+def get_report(hours: float | None = None):
+    try:
+        return report(hours if hours is not None else float(settings()["interval_hours"]))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post("/api/sellers")
+def add_seller(body: SellerInput):
+    try:
+        user_id, url = seller_identity(body.url)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    with connect() as db:
+        db.execute("INSERT OR IGNORE INTO sellers VALUES (?,?,?,?,?)",
+                   (user_id, body.name.strip() or f"用户 {user_id}", url, 1, now()))
+    return {"id": user_id}
+
+
+@app.patch("/api/sellers/{seller_id}")
+def patch_seller(seller_id: str, body: SellerPatch):
+    with connect() as db:
+        if not db.execute("SELECT 1 FROM sellers WHERE id=?", (seller_id,)).fetchone():
+            raise HTTPException(404)
+        if body.name is not None:
+            db.execute("UPDATE sellers SET name=? WHERE id=?", (body.name.strip() or seller_id, seller_id))
+        if body.selected is not None:
+            db.execute("UPDATE sellers SET selected=? WHERE id=?", (int(body.selected), seller_id))
+    return {"ok": True}
+
+
+@app.delete("/api/sellers/{seller_id}")
+def delete_seller(seller_id: str):
+    with connect() as db:
+        db.execute("UPDATE sellers SET selected=0 WHERE id=?", (seller_id,))
+    return {"ok": True}
+
+
+@app.put("/api/settings")
+def put_settings(body: SettingsInput):
+    with connect() as db:
+        for key, value in body.model_dump().items():
+            db.execute("INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                       (key, json.dumps(value)))
+    return settings()
+
+
+class ChromeStatus(BaseModel):
+    ok: bool
+
+
+class CapturedItem(BaseModel):
+    seller_id: str
+    url: str
+    title: str = Field(min_length=1, max_length=180)
+    image: str = ""
+    price: str | None = None
+    views: int | None = Field(default=None, ge=0)
+    wants: int | None = Field(default=None, ge=0)
+    status: str = "未知"
+
+
+class RunFinish(BaseModel):
+    run_id: int
+    found: int = Field(ge=0)
+    valid: int = Field(ge=0)
+    errors: list[str] = Field(default_factory=list)
+
+
+@app.post("/api/chrome/status")
+def chrome_status(body: ChromeStatus):
+    global last_login
+    last_login = "已连接 Chrome 登录页" if body.ok else "Chrome 登录未确认"
+    return {"status": last_login}
+
+
+@app.post("/api/chrome/following")
+def chrome_following(candidates: list[SellerInput]):
+    imported = 0
+    with connect() as db:
+        for candidate in candidates[:300]:
+            try:
+                user_id, url = seller_identity(candidate.url)
+            except ValueError:
+                continue
+            exists = db.execute("SELECT 1 FROM sellers WHERE id=?", (user_id,)).fetchone()
+            db.execute("INSERT OR IGNORE INTO sellers VALUES (?,?,?,?,?)",
+                       (user_id, candidate.name.strip() or f"用户 {user_id}", url, 0, now()))
+            imported += not bool(exists)
+    return {"imported": imported}
+
+
+@app.post("/api/chrome/run/start")
+def chrome_run_start():
+    with connect() as db:
+        if not db.execute("SELECT 1 FROM sellers WHERE selected=1").fetchone():
+            raise HTTPException(400, "请先在监控名单中勾选重点卖家")
+        run_id = db.execute("INSERT INTO runs(started_at,state) VALUES (?,?)", (now(), "运行中")).lastrowid
+    return {"run_id": run_id}
+
+
+@app.post("/api/chrome/run/item")
+def chrome_run_item(item: CapturedItem):
+    item_id = item_identity(item.url)
+    if not item_id:
+        raise HTTPException(400, "商品链接不是闲鱼官方商品页")
+    if item.views is None and item.wants is None and not item.price:
+        raise HTTPException(400, "商品没有可识别指标，已跳过")
+    if item.image:
+        parsed = urlparse(item.image)
+        if parsed.scheme not in ("https", "http"):
+            raise HTTPException(400, "商品图片地址无效")
+    with connect() as db:
+        if not db.execute("SELECT 1 FROM sellers WHERE id=? AND selected=1", (item.seller_id,)).fetchone():
+            raise HTTPException(400, "卖家未被选为重点")
+        stamp = now()
+        db.execute("""INSERT INTO items VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET seller_id=excluded.seller_id,
+            title=excluded.title,url=excluded.url,image=excluded.image,
+            price=excluded.price,last_seen=excluded.last_seen""",
+            (item_id, item.seller_id, item.title, item.url, item.image, item.price, stamp))
+        db.execute("INSERT OR REPLACE INTO snapshots VALUES (?,?,?,?,?,?)",
+                   (item_id, stamp, item.views, item.wants, item.price, item.status))
+    return {"id": item_id}
+
+
+@app.post("/api/chrome/run/finish")
+def chrome_run_finish(body: RunFinish):
+    state = "完成" if body.valid and not body.errors else "部分完成" if body.valid else "失败"
+    message = "；".join(body.errors[:5]) if body.errors else "采集完成"
+    with connect() as db:
+        result = db.execute("UPDATE runs SET finished_at=?,state=?,found=?,valid=?,message=? WHERE id=? AND state='运行中'",
+                            (now(), state, body.found, body.valid, message, body.run_id))
+        if not result.rowcount:
+            raise HTTPException(404, "采集任务不存在或已完成")
+    return {"state": state, "found": body.found, "valid": body.valid, "message": message}

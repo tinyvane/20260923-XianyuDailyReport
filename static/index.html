@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>闲鱼商品监控日报</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div class="brand"><div class="brand-mark">闲鱼</div><span>闲鱼</span></div>
+      <h1>闲鱼商品监控日报</h1>
+      <time id="report-date">—</time>
+      <span class="hero-gear gear-one">⚙</span><span class="hero-gear gear-two">⚙</span>
+      <svg class="hero-chart" viewBox="0 0 290 150" fill="none" aria-hidden="true"><path d="M4 128L74 78L116 95L174 30L210 55L275 7" stroke="#7fd9d0" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/><path d="M237 7h38v38" stroke="#7fd9d0" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/><path d="M24 149v-23M68 149v-42M112 149V96M156 149V69M200 149V89" stroke="#a1c9fa" stroke-width="17" opacity=".5"/></svg>
+    </header>
+
+    <section class="controls" aria-label="采集操作">
+      <div class="control-intro"><span class="live-dot"></span><span id="control-status">准备就绪</span></div>
+      <div class="control-actions">
+        <label class="field compact">对比时长
+          <select id="hours"><option value="1">1 小时</option><option value="6">6 小时</option><option value="12">12 小时</option><option value="24">24 小时</option><option value="72">3 天</option><option value="168">7 天</option><option value="720">30 天</option></select>
+        </label>
+        <button id="open-browser" class="button subtle" type="button">连接现有 Chrome</button>
+        <button id="check-login" class="button subtle" type="button">检查登录</button>
+        <button id="import-following" class="button subtle" type="button">导入 Chrome 关注页</button>
+        <button id="collect" class="button primary" type="button">立即采集</button>
+        <button id="settings-button" class="button icon-button" type="button" aria-label="设置">⚙</button>
+      </div>
+    </section>
+
+    <section class="summary">
+      <article class="card status-card">
+        <div class="card-heading"><span class="round-icon green">✓</span><h2>数据状态</h2></div>
+        <div class="status-line">数据状态：<strong id="data-state">等待首次采集</strong></div>
+        <div class="status-stats"><p>采集商品：<b id="valid-count">—</b> 有效</p><p>对比间隔：<b id="interval-label">24</b> 小时</p></div>
+        <small id="latest-run">尚无采集记录</small>
+      </article>
+      <article class="card overview-card">
+        <div class="card-heading"><span class="duo-icon"><span>◉</span><span>♥</span></span><h2>全站概览</h2></div>
+        <div class="overview-content">
+          <div class="metric-block blue"><span class="metric-icon">◉</span><div><strong id="views-total">—</strong><span>浏览新增</span></div></div>
+          <div class="metric-block red"><strong id="wants-total">—</strong><span>想要新增</span><small>计数异常：<b id="count-unknown">—</b></small></div>
+          <div class="metric-aside"><p>价格或状态变化：<b id="price-change">—</b></p><p>缺少对比数据：<b id="missing-count">—</b></p></div>
+        </div>
+      </article>
+    </section>
+
+    <section class="card report-card">
+      <div class="section-heading"><span class="round-icon orange">🏆</span><h2>浏览增长前五</h2><span class="section-note" id="ranking-note"></span></div>
+      <div class="ranking" id="ranking"><div class="empty-state">还没有可对比的数据。完成首次采集后，经过选定时长再采集即可看到增长榜。</div></div>
+      <div class="section-heading sellers-heading"><span class="round-icon purple">♟</span><h2>重点关注卖家</h2><span class="section-note" id="seller-note"></span></div>
+      <div class="sellers-report" id="seller-report"><div class="empty-state">尚未选择重点卖家。请在闲鱼浏览器中打开关注列表并导入，或在下方手动添加主页链接。</div></div>
+    </section>
+
+    <section class="management">
+      <div class="management-title"><div><span class="eyebrow">MONITORING WORKSPACE</span><h2>监控名单</h2><p>在已登录的 Chrome 中打开闲鱼关注页，再点击导入并勾选重点卖家；也可以添加主页链接。</p></div><button id="refresh" class="button subtle" type="button">刷新数据</button></div>
+      <p class="extension-guide">首次使用：在 Chrome 打开 <code>chrome://extensions</code>，开启开发者模式，加载本项目的 <code>chrome-extension</code> 文件夹，然后刷新日报。<button id="copy-extension-path" type="button">复制扩展目录</button></p>
+      <form id="seller-form" class="add-form"><input id="seller-url" type="url" required placeholder="粘贴闲鱼个人主页链接，例如 https://www.goofish.com/personal?userId=…" aria-label="闲鱼卖家主页链接"><input id="seller-name" type="text" maxlength="80" placeholder="备注名称（可选）" aria-label="卖家备注名称"><button class="button dark" type="submit">添加卖家</button></form>
+      <div class="seller-list" id="seller-list"><p class="list-empty">暂无卖家</p></div>
+    </section>
+
+    <footer><span>闲鱼监控助手</span><span class="barcode" aria-hidden="true"></span><span>仅在本机保存登录资料与快照 · 数据来自当前官方页面</span></footer>
+  </main>
+
+  <dialog id="settings-dialog" class="settings-dialog"><form method="dialog" id="settings-form"><div class="modal-heading"><div><span class="eyebrow">PREFERENCES</span><h2>采集设置</h2></div><button class="close" value="cancel" aria-label="关闭" type="submit">×</button></div><label class="setting-row"><span><b>启动后自动采集</b><small>打开日报页面时连接当前 Chrome 并采集</small></span><input id="auto-collect" type="checkbox"></label><label class="setting-row"><span><b>自动采集间隔</b><small>日报页面保持打开时按间隔自动采集</small></span><select id="schedule-minutes"><option value="30">30 分钟</option><option value="60">1 小时</option><option value="180">3 小时</option><option value="360">6 小时</option><option value="1440">24 小时</option></select></label><p class="modal-tip">直接复用当前 Chrome 的闲鱼登录，无需重开独立浏览器。关闭日报页面后自动采集暂停；重新打开时可继续。</p><button class="button primary full" id="save-settings" type="button">保存设置</button></form></dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

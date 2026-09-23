@@ -1,0 +1,142 @@
+const ORIGIN = "https://www.goofish.com";
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function sellerId(url) {
+  try {
+    const u = new URL(url);
+    if (!["https://www.goofish.com","https://goofish.com"].includes(u.origin) || !/^\/(personal|user)/.test(u.pathname)) return null;
+    const id = u.searchParams.get("userId") || u.searchParams.get("user_id") || u.searchParams.get("id");
+    return /^[A-Za-z0-9_-]{4,80}$/.test(id || "") ? id : null;
+  } catch { return null; }
+}
+function itemId(url) {
+  try {
+    const u = new URL(url);
+    if (!["https://www.goofish.com","https://goofish.com"].includes(u.origin) || u.pathname !== "/item") return null;
+    const id = u.searchParams.get("id");
+    return /^\d{8,22}$/.test(id || "") ? id : null;
+  } catch { return null; }
+}
+async function currentGoofishTab() {
+  const tabs = await chrome.tabs.query({url: ["https://www.goofish.com/*", "https://goofish.com/*"]});
+  const tab = tabs.find(t => t.active) || tabs.at(-1);
+  if (!tab?.id) throw Error("没有找到已打开的闲鱼 Chrome 标签页，请在 Chrome 中打开闲鱼");
+  return tab;
+}
+async function inject(tabId, func) {
+  const result = await chrome.scripting.executeScript({target:{tabId},func});
+  if (!result?.[0]) throw Error("无法读取闲鱼标签页");
+  return result[0].result;
+}
+async function createReadClose(url, reader) {
+  const tab = await chrome.tabs.create({url, active:false});
+  try {
+    await new Promise((resolve,reject) => {
+      const timer = setTimeout(() => {chrome.tabs.onUpdated.removeListener(listener); reject(Error("闲鱼页面加载超时"));}, 30000);
+      function listener(id, change) {
+        if (id === tab.id && change.status === "complete") {
+          clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); resolve();
+        }
+      }
+      chrome.tabs.onUpdated.addListener(listener);
+      chrome.tabs.get(tab.id).then(t => {if (t.status === "complete") {clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); resolve();}}).catch(reject);
+    });
+    await sleep(1500);
+    return await inject(tab.id, reader);
+  } finally { await chrome.tabs.remove(tab.id).catch(() => {}); }
+}
+function pageSummary() {
+  const text = (document.body?.innerText || "").slice(0, 2000);
+  const visibleLogin = [...document.querySelectorAll("button,a,[role=button]")].some(node =>
+    node.getClientRects().length && node.textContent?.trim() === "登录");
+  return {
+    url: location.href,
+    blocked: /非法访问|安全验证|验证码|滑块/.test(text),
+    loginPrompt: /请登录|扫码登录|登录后查看/.test(text),
+    visibleLogin,
+    personalLinks: document.querySelectorAll('a[href*="/personal"],a[href*="/user"]').length,
+    hasBody: text.length > 100 && text.includes("搜索")
+  };
+}
+function followingLinks() {
+  const text = (document.body?.innerText || "").slice(0, 3000);
+  const anchors = [...document.querySelectorAll('a[href*="/personal"],a[href*="/user"]')];
+  return {
+    url: location.href,
+    blocked: /非法访问|安全验证|验证码|滑块|请登录|扫码登录/.test(text),
+    hasFollowing: text.includes("关注"),
+    candidates: anchors.map(a => ({url:a.href, name:(a.innerText || a.getAttribute("title") || "").trim().slice(0,80)}))
+  };
+}
+function sellerItems() {
+  const text = (document.body?.innerText || "").slice(0, 2000);
+  return {
+    blocked: /非法访问|安全验证|验证码|滑块|请登录|扫码登录/.test(text),
+    urls: [...new Set([...document.querySelectorAll('a[href*="/item?"]')].map(a => a.href))].slice(0, 80)
+  };
+}
+function itemData() {
+  const body = document.body?.innerText || "";
+  const main = document.querySelector("main")?.innerText || body.slice(0, 14000);
+  const text = main.slice(0, 14000);
+  const first = (pattern) => {
+    const hit = text.match(pattern);
+    if (!hit) return null;
+    const raw = hit[1];
+    const scale = raw.endsWith("万") ? 10000 : raw.endsWith("千") ? 1000 : 1;
+    return Math.round(parseFloat(raw) * scale);
+  };
+  const price = text.match(/¥\s*([\d,.]+)/)?.[1] || null;
+  const views = first(/(?:浏览\s*)(\d+(?:\.\d+)?[万千]?)/) ?? first(/(\d+(?:\.\d+)?[万千]?)\s*(?:次)?浏览/);
+  const wants = first(/(?:想要\s*)(\d+(?:\.\d+)?[万千]?)/) ?? first(/(\d+(?:\.\d+)?[万千]?)\s*人想要/);
+  const title = (document.querySelector("h1")?.innerText || document.querySelector('meta[property="og:title"]')?.content || "").trim().slice(0,180);
+  const sellerUrl = (document.querySelector('main a[href*="/personal"], main a[href*="/user"]') ||
+    document.querySelector('a[href*="/personal"],a[href*="/user"]'))?.href || "";
+  return {
+    blocked: /非法访问|安全验证|验证码|滑块|请登录|扫码登录/.test(body.slice(0,1200)),
+    title, price, views, wants, sellerUrl,
+    image: document.querySelector('meta[property="og:image"]')?.content || "",
+    status: /宝贝已下架|商品已下架|已售出/.test(text) ? "已下架" : "未知"
+  };
+}
+async function handle(message) {
+  const {command,payload={}} = message;
+  if (command === "status") {
+    const tab = await currentGoofishTab();
+    const result = await inject(tab.id, pageSummary);
+    const session = await chrome.cookies.get({url:ORIGIN,name:"unb"});
+    if (result.blocked || result.loginPrompt || result.visibleLogin || !result.hasBody || !session)
+      throw Error("闲鱼 Chrome 页面正在验证、未登录或尚未加载完成");
+    return {ok:true, url:result.url, personalLinks:result.personalLinks};
+  }
+  if (command === "following") {
+    const tab = await currentGoofishTab();
+    const result = await inject(tab.id, followingLinks);
+    if (result.blocked || !result.hasFollowing || !/\/(personal|user|follow)/i.test(new URL(result.url).pathname))
+      throw Error("请先在已登录的闲鱼 Chrome 标签页打开自己的关注列表");
+    const candidates = result.candidates.filter(c => sellerId(c.url)).slice(0,300);
+    return {candidates};
+  }
+  if (command === "listItems") {
+    if (!sellerId(payload.url)) throw Error("卖家主页链接无效");
+    const result = await createReadClose(payload.url, sellerItems);
+    if (result.blocked) throw Error("卖家页面要求登录或安全验证");
+    return {urls:result.urls.filter(u => itemId(u)).slice(0,40)};
+  }
+  if (command === "readItem") {
+    if (!itemId(payload.url)) throw Error("商品链接无效");
+    const result = await createReadClose(payload.url, itemData);
+    if (result.blocked) throw Error("商品页面要求登录或安全验证");
+    if (!result.title || (result.price == null && result.views == null && result.wants == null))
+      throw Error("商品页面没有可识别的标题和指标");
+    if (!sellerId(result.sellerUrl) || sellerId(result.sellerUrl) !== payload.sellerId)
+      throw Error("商品页未能确认属于所选卖家");
+    return {item:result};
+  }
+  throw Error("未知指令");
+}
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!sender.url?.startsWith("http://127.0.0.1:5055/")) return;
+  handle(message).then(sendResponse).catch(error => sendResponse({error:error.message || "读取失败"}));
+  return true;
+});
